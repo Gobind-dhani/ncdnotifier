@@ -16,6 +16,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import java.util.Locale;
 
 @Service
 public class BondFileService {
@@ -23,8 +24,8 @@ public class BondFileService {
     private static final Logger log = LoggerFactory.getLogger(BondFileService.class);
 
     private static final List<String> FILE_URLS = List.of(
-         //   "https://nsearchives.nseindia.com/content/debt/Corporate_bond_report_04-Nov-2025.csv"
-          "https://www.nseindia.com/api/reports?archives=%5B%7B%22name%22%3A%22Approved%20list%20of%20GSEC%20and%20TBILL%20(.zip)%22%2C%22type%22%3A%22monthly-reports%22%2C%22category%22%3A%22debt%22%2C%22section%22%3A%22nse-ebp%22%7D%5D&type=nse-ebp&mode=single"
+              "https://nsearchives.nseindia.com/content/debt/Corporate_bond_report_14-Nov-2025.csv",
+            "https://www.nseindia.com/api/reports?archives=%5B%7B%22name%22%3A%22Approved%20list%20of%20GSEC%20and%20TBILL%20(.zip)%22%2C%22type%22%3A%22monthly-reports%22%2C%22category%22%3A%22debt%22%2C%22section%22%3A%22nse-ebp%22%7D%5D&type=nse-ebp&mode=single"
     );
 
     public List<BondRecord> fetchAllBonds() {
@@ -206,12 +207,27 @@ public class BondFileService {
 
                 if (vNode != null) {
                     value = vNode.getTextContent();
+
                     if ("s".equals(type)) {
                         try {
                             int sidx = Integer.parseInt(value);
                             value = shared.getOrDefault(sidx, "");
                         } catch (NumberFormatException ex) {
                             // leave value as-is
+                        }
+                    } else {
+                        // numeric or other non-shared value: might be Excel numeric date serial
+                        // detect numeric (integer or decimal)
+                        if (value != null && value.matches("^-?\\d+(\\.\\d+)?$")) {
+                            try {
+                                double serial = Double.parseDouble(value);
+                                // Excel date serials count days from 1899-12-30
+                                long days = (long) Math.floor(serial);
+                                LocalDate excelDate = LocalDate.of(1899, 12, 30).plusDays(days);
+                                value = excelDate.toString(); // yyyy-MM-dd
+                            } catch (Exception ignored) {
+                                // if parsing fails, keep raw numeric as string
+                            }
                         }
                     }
                 } else if (tNode != null) {
@@ -380,11 +396,6 @@ public class BondFileService {
             String su = s.trim().toUpperCase();
             if (su.matches("\\d{1,2}[A-Z]{3}\\d{4}")) {
                 DateTimeFormatter fmt = DateTimeFormatter.ofPattern("ddMMMyyyy", Locale.ENGLISH);
-                // insert zero if day is single-digit (rare), but pattern accepts 1-2 digits in dd
-                // convert month to proper form already in uppercase
-                // replace month text to match expected (e.g., FEB)
-                // normalize string: ensure month part is letters
-                // For safety, attempt parse by converting to e.g. 14FEB2027 -> 14FEB2027
                 return LocalDate.parse(su, fmt);
             }
         } catch (Exception ignored) {}

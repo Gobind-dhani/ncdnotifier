@@ -25,10 +25,10 @@ public class NcdNotificationService {
     private final NotificationManager notificationManager;
 
     @Value("${ncd.maturity-lookahead-days}")
-    private int lookaheadDays;
+    private int lookaheadDays; // Example: 180 days
 
     @Value("${ncd.notify-before-days}")
-    private String notifyBeforeDays;
+    private String notifyBeforeDays; // Example: 30,15,7,3,2,1
 
     private static final Logger log = LoggerFactory.getLogger(NcdNotificationService.class);
 
@@ -46,16 +46,22 @@ public class NcdNotificationService {
         this.notificationManager = notificationManager;
     }
 
+    /**
+     * MAIN ENTRY
+     */
     public void processMaturingBonds() {
-        int totalIsinsProcessed = 0;
+
+        int totalValidIsins = 0;
+        int totalNotificationsSent = 0;
+        int skippedNullDate = 0;
+        int skippedOutOfWindow = 0;
         int isinsWithClients = 0;
         int isinsWithoutClients = 0;
-        int skippedOutOfRange = 0;
-        int skippedNullDate = 0;
 
         try {
             List<BondFileService.BondRecord> bonds = bondFileService.fetchAllBonds();
             LocalDate today = LocalDate.now();
+            List<String> notifyDaysList = Arrays.asList(notifyBeforeDays.split(","));
 
             log.info("📄 Total bonds fetched from files: {}", bonds.size());
 
@@ -63,73 +69,94 @@ public class NcdNotificationService {
 
                 if (bond.maturityDate() == null) {
                     skippedNullDate++;
-                    log.debug("⏭️ Skipping bond {} ({}): maturity date is null", bond.name(), bond.isin());
                     continue;
                 }
 
-                long daysToMaturity = Duration.between(today.atStartOfDay(), bond.maturityDate().atStartOfDay()).toDays();
+                long daysLeft = Duration.between(
+                        today.atStartOfDay(),
+                        bond.maturityDate().atStartOfDay()
+                ).toDays();
 
-                // Log the first few for inspection
-                if (totalIsinsProcessed + skippedOutOfRange + skippedNullDate < 50) {
-                    log.debug("Bond: {} ({}) matures in {} days", bond.name(), bond.isin(), daysToMaturity);
+                // 👇 FIXED LOGIC:
+                // Step 1: Include ALL ISINs within lookahead window (0 → 180 days)
+                if (daysLeft < 0 || daysLeft > lookaheadDays) {
+                    skippedOutOfWindow++;
+                    continue;
                 }
 
-                List<String> notifyDays = Arrays.asList(notifyBeforeDays.split(","));
-                if (daysToMaturity <= lookaheadDays && daysToMaturity >= 0 &&
-                        notifyDays.contains(String.valueOf(daysToMaturity))) {
+                totalValidIsins++;
 
-                    totalIsinsProcessed++;
+                // Step 2: Only send notifications on notify-before-days
+                boolean shouldNotifyToday = notifyDaysList.contains(String.valueOf(daysLeft));
 
-                    List<Map<String, Object>> clients = getClientsHoldingIsin(bond.isin());
-                    if (clients.isEmpty()) isinsWithoutClients++;
-                    else isinsWithClients++;
+                if (!shouldNotifyToday) {
+                    continue; // valid isin but no notification today
+                }
 
-                    log.info("Found {} client(s) for ISIN {} ({})", clients.size(), bond.isin(), bond.name());
+                // Fetch clients holding the ISIN
+                List<Map<String, Object>> clients = getClientsHoldingIsin(bond.isin());
 
-                    for (Map<String, Object> client : clients) {
-                        String clientId = (String) client.get("client_id");
-                        String partyCd = "C" + clientId;
-                        Map<String, Object> cust = getCustomerDetails(partyCd);
-                        if (cust == null) continue;
+                if (clients.isEmpty()) {
+                    isinsWithoutClients++;
+                    continue;
+                } else {
+                    isinsWithClients++;
+                }
 
-                        String email = (String) cust.get("email_id");
-                        String mobile = (String) cust.get("mobile_no");
+                log.info("🔔 ISIN {} ({}) matures in {} days → {} clients found",
+                        bond.isin(), bond.name(), daysLeft, clients.size());
 
-                        String message = String.format(
-                                "Dear Client, your pledged NCD %s (%s) is reaching maturity in %d days. " +
-                                        "Margin benefit will cease from %s. Positions may be squared off if margin insufficient.",
-                                bond.name(), bond.isin(), daysToMaturity, bond.maturityDate()
-                        );
+                // Send notifications to all clients
+                for (Map<String, Object> client : clients) {
 
-                        sendAndLog(clientId, bond, message, email, mobile);
+                    String clientId = (String) client.get("client_id");
+                    String partyCd = "C" + clientId;
+
+                    Map<String, Object> cust = getCustomerDetails(partyCd);
+                    if (cust == null) {
+                        continue;
                     }
 
-                } else {
-                    skippedOutOfRange++;
+                    String email = (String) cust.get("email_id");
+                    String mobile = (String) cust.get("mobile_no");
+
+                    String message = String.format(
+                            "Dear Client, your pledged NCD %s (%s) is reaching maturity in %d days. " +
+                                    "Margin benefit will cease from %s. Positions may be squared off if margin is insufficient.",
+                            bond.name(), bond.isin(), daysLeft, bond.maturityDate()
+                    );
+
+                    totalNotificationsSent += sendAndLog(clientId, bond, message, email, mobile);
                 }
             }
 
-            log.info("✅ Processing Summary:");
-            log.info(" - Total bonds fetched: {}", bonds.size());
-            log.info(" - Bonds skipped (null maturity): {}", skippedNullDate);
-            log.info(" - Bonds skipped (outside lookahead or notify days): {}", skippedOutOfRange);
-            log.info(" - ISINs processed: {}", totalIsinsProcessed);
-            log.info(" - ISINs with clients: {}", isinsWithClients);
-            log.info(" - ISINs without clients: {}", isinsWithoutClients);
+            // ─────────────────────────────────────────────
+            // FINAL SUMMARY
+            // ─────────────────────────────────────────────
+            log.info(" NCD NOTIFICATION SUMMARY");
+            log.info("• Total bonds fetched: {}", bonds.size());
+            log.info("• Bonds skipped (null maturity): {}", skippedNullDate);
+            log.info("• Bonds outside lookahead window: {}", skippedOutOfWindow);
+            log.info("• Valid ISINs in lookahead window: {}", totalValidIsins);
+            log.info("• ISINs with clients: {}", isinsWithClients);
+            log.info("• ISINs without clients: {}", isinsWithoutClients);
+            log.info("• Total notifications sent: {}", totalNotificationsSent);
 
         } catch (Exception e) {
-            log.error("Error processing maturing bonds", e);
+            log.error(" Error processing maturing bonds", e);
         }
     }
 
+    // ============================================================
+    // DB METHODS
+    // ============================================================
+
     private List<Map<String, Object>> getClientsHoldingIsin(String isin) {
         String sql = "SELECT DISTINCT client_id FROM sapphire.vw_final_holding_midoffice WHERE isin = ?";
-        List<Map<String, Object>> clients = primaryJdbcTemplate.queryForList(sql, isin);
+        List<Map<String, Object>> list = primaryJdbcTemplate.queryForList(sql, isin);
 
-        // ✅ Log each ISIN lookup and how many clients were found
-        log.info("Queried ISIN {} -> {} client(s) found in vw_final_holding_midoffice", isin, clients.size());
-
-        return clients;
+        log.debug("ISIN {} → {} clients found", isin, list.size());
+        return list;
     }
 
     private Map<String, Object> getCustomerDetails(String partyCd) {
@@ -138,11 +165,19 @@ public class NcdNotificationService {
         return result.isEmpty() ? null : result.get(0);
     }
 
-    private void sendAndLog(String clientId, BondFileService.BondRecord bond, String message, String email, String mobile) {
+    // ============================================================
+    // SEND NOTIFICATION + LOG
+    // ============================================================
 
-        LocalDate maturityDate = bond.maturityDate() != null ? bond.maturityDate() : LocalDate.now();
+    private int sendAndLog(String clientId, BondFileService.BondRecord bond,
+                           String message, String email, String mobile) {
 
+        int sentCount = 0;
+        LocalDate maturityDate = bond.maturityDate();
+
+        // ---------- EMAIL ----------
         if (email != null && !email.isBlank()) {
+
             notificationManager.sendNotification(NotificationRequest.builder()
                     .recipient(email)
                     .subject("NCD Maturity Alert")
@@ -162,9 +197,13 @@ public class NcdNotificationService {
                     .status("SENT")
                     .notifiedOn(LocalDateTime.now())
                     .build());
+
+            sentCount++;
         }
 
+        // ---------- SMS ----------
         if (mobile != null && !mobile.isBlank()) {
+
             notificationManager.sendNotification(NotificationRequest.builder()
                     .recipient(mobile)
                     .message(message)
@@ -182,6 +221,10 @@ public class NcdNotificationService {
                     .status("SENT")
                     .notifiedOn(LocalDateTime.now())
                     .build());
+
+            sentCount++;
         }
+
+        return sentCount;
     }
 }
