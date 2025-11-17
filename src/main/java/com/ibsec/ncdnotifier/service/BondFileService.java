@@ -24,7 +24,7 @@ public class BondFileService {
     private static final Logger log = LoggerFactory.getLogger(BondFileService.class);
 
     private static final List<String> FILE_URLS = List.of(
-              "https://nsearchives.nseindia.com/content/debt/Corporate_bond_report_14-Nov-2025.csv",
+             // "https://nsearchives.nseindia.com/content/debt/Corporate_bond_report_14-Nov-2025.csv",
             "https://www.nseindia.com/api/reports?archives=%5B%7B%22name%22%3A%22Approved%20list%20of%20GSEC%20and%20TBILL%20(.zip)%22%2C%22type%22%3A%22monthly-reports%22%2C%22category%22%3A%22debt%22%2C%22section%22%3A%22nse-ebp%22%7D%5D&type=nse-ebp&mode=single"
     );
 
